@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Installs or updates PLSQL IDE and, when it is missing, Oracle Instant Client.
+# Usage: curl -fsSL https://odilovsanjarbek.github.io/plsql | bash
+set -euo pipefail
+
+REPO="odilovsanjarbek/plsql-ide-releases"
+APP_NAME="PLSQL IDE.app"
+APPS_DIR="${APPS_DIR:-/Applications}"
+ORACLE_DIR="$HOME/oracle"
+ORACLE_DOWNLOADS="https://download.oracle.com/otn_software/mac/instantclient"
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
+mount_dmg() {
+  mkdir -p "$MOUNT"
+  hdiutil attach "$1" -nobrowse -readonly -mountpoint "$MOUNT" </dev/null >/dev/null 2>&1 ||
+    fail "Could not open $1."
+}
+
+unmount_dmg() {
+  hdiutil detach "$MOUNT" </dev/null >/dev/null 2>&1 || true
+}
+
+cleanup() {
+  unmount_dmg
+  rm -rf "$WORK"
+}
+
+install_app() {
+  local latest tag version
+  latest="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
+  tag="${latest##*/}"
+  case "$tag" in
+    v*) version="${tag#v}" ;;
+    *) fail "No published release yet: https://github.com/$REPO/releases" ;;
+  esac
+
+  echo "Downloading PLSQL IDE $version..."
+  curl -fL --progress-bar -o "$WORK/app.dmg" \
+    "https://github.com/$REPO/releases/download/$tag/PLSQL-IDE-$version-universal.dmg"
+  mount_dmg "$WORK/app.dmg"
+  rm -rf "${APPS_DIR:?}/$APP_NAME"
+  ditto "$MOUNT/$APP_NAME" "$APPS_DIR/$APP_NAME"
+  unmount_dmg
+}
+
+install_client() {
+  local lib url dir
+  # The two places the app searches by default for a client of its own.
+  for lib in "$ORACLE_DIR"/instantclient_*/libclntsh.dylib /opt/oracle/instantclient_*/libclntsh.dylib; do
+    if [ -e "$lib" ]; then
+      echo "Oracle Instant Client is already installed."
+      return
+    fi
+  done
+
+  # Not `uname -m`: a shell running under Rosetta reports x86_64 on Apple Silicon.
+  if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
+    url="$ORACLE_DOWNLOADS/instantclient-basic-macos-arm64.dmg"
+    dir="$ORACLE_DIR/instantclient_23"
+  else
+    url="$ORACLE_DOWNLOADS/1916000/instantclient-basic-macos.x64-19.16.0.0.0dbru.dmg"
+    dir="$ORACLE_DIR/instantclient_19"
+  fi
+
+  echo "Downloading Oracle Instant Client from Oracle..."
+  curl -fL --progress-bar -o "$WORK/client.dmg" "$url"
+  mount_dmg "$WORK/client.dmg"
+  mkdir -p "$dir"
+  cp -R -P -f "$MOUNT"/* "$dir"/
+  rm -f "$dir/install_ic.sh" "$dir/INSTALL_IC_README.txt"
+  unmount_dmg
+  echo "Oracle Instant Client is in $dir. Its license: $dir/BASIC_LICENSE"
+}
+
+main() {
+  [ "$(uname -s)" = Darwin ] || fail "PLSQL IDE runs on macOS only."
+  [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 13 ] || fail "PLSQL IDE needs macOS 13 or later."
+  if pgrep -f "$APP_NAME/Contents/MacOS/plsql-ide" >/dev/null; then
+    fail "Close PLSQL IDE first, then run this again."
+  fi
+
+  # Only an administrator can write to /Applications.
+  [ -w "$APPS_DIR" ] || APPS_DIR="$HOME/Applications"
+  mkdir -p "$APPS_DIR"
+
+  WORK="$(mktemp -d)"
+  MOUNT="$WORK/mount"
+  trap cleanup EXIT
+
+  install_app
+  install_client
+
+  echo "PLSQL IDE is in $APPS_DIR. Opening it..."
+  open "$APPS_DIR/$APP_NAME"
+}
+
+# Last, so a download cut short runs nothing.
+main "$@"
