@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Installs or updates Nectar and, when it is missing, Oracle Instant Client.
+# Installs or updates Nectar (quitting it first, and only when a newer one is
+# out) and, when it is missing, Oracle Instant Client.
 # Usage: curl -fsSL https://odilovsanjarbek.github.io/nectar | bash
 set -euo pipefail
 
@@ -38,6 +39,13 @@ install_app() {
     *) fail "No published release yet: https://github.com/$REPO/releases" ;;
   esac
 
+  installed="$(defaults read "$APPS_DIR/$APP_NAME/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)"
+  if [ "$installed" = "$version" ]; then
+    echo "Nectar $version is already the latest."
+    return
+  fi
+
+  quit_app
   echo "Downloading Nectar $version..."
   curl -fL --progress-bar -o "$WORK/app.dmg" \
     "https://github.com/$REPO/releases/download/$tag/Nectar-$version-universal.dmg"
@@ -45,6 +53,24 @@ install_app() {
   rm -rf "${APPS_DIR:?}/$APP_NAME"
   ditto "$MOUNT/$APP_NAME" "$APPS_DIR/$APP_NAME"
   unmount_dmg
+}
+
+# A running Nectar is asked to quit, as with ⌘Q, so it can keep what is open;
+# it is not forced, and if it stays (a question on its screen) we stop.
+quit_app() {
+  local running="$APPS_DIR/$APP_NAME/Contents/MacOS/"
+  pgrep -f "$running" >/dev/null || return 0
+  echo "Quitting Nectar..."
+  # By process, not by name: another copy (a test build) may be running too.
+  for pid in $(pgrep -f "$running"); do
+    osascript -l JavaScript -e "ObjC.import('AppKit');
+      \$.NSRunningApplication.runningApplicationWithProcessIdentifier($pid).terminate" >/dev/null 2>&1 || true
+  done
+  for _ in $(seq 1 60); do
+    pgrep -f "$running" >/dev/null || return 0
+    sleep 0.5
+  done
+  fail "Nectar did not quit: close it, then run this again."
 }
 
 install_client() {
@@ -79,10 +105,6 @@ install_client() {
 main() {
   [ "$(uname -s)" = Darwin ] || fail "Nectar runs on macOS only."
   [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 13 ] || fail "Nectar needs macOS 13 or later."
-  if pgrep -f "$APP_NAME/Contents/MacOS/nectar" >/dev/null; then
-    fail "Close Nectar first, then run this again."
-  fi
-
   # Only an administrator can write to /Applications.
   [ -w "$APPS_DIR" ] || APPS_DIR="$HOME/Applications"
   mkdir -p "$APPS_DIR"
