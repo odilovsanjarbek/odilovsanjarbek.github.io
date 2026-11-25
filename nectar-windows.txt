@@ -1,4 +1,5 @@
-# Installs or updates Nectar on Windows and, when no Oracle Client is found,
+# Installs or updates Nectar on Windows (closing it first, and only when a
+# newer one is out) and, when no Oracle Client is found,
 # Oracle Instant Client.
 # Usage (PowerShell): irm https://odilovsanjarbek.github.io/nectar-windows.txt | iex
 # (Kept ASCII: PowerShell may read a downloaded script in the system code page.)
@@ -44,8 +45,33 @@
     if (($env:Path -split ";") -notcontains $dir) { $env:Path = "$env:Path;$dir" }
   }
 
+  # The version of an installed Nectar, from its uninstall entry.
+  function Get-InstalledVersion {
+    $keys = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+      "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+      "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    $entry = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
+      Where-Object { $_.DisplayName -eq "Nectar" } | Select-Object -First 1
+    if ($entry) { return $entry.DisplayVersion }
+    return $null
+  }
+
+  # A running Nectar is asked to close, as with its window's close button, so it
+  # can keep what is open; it is not forced, and if it stays (a question on its
+  # screen) we stop.
+  function Close-Nectar {
+    $running = Get-Process -Name nectar -ErrorAction SilentlyContinue
+    if (-not $running) { return }
+    Write-Host "Closing Nectar..."
+    $running | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+    for ($i = 0; $i -lt 60; $i++) {
+      if (-not (Get-Process -Name nectar -ErrorAction SilentlyContinue)) { return }
+      Start-Sleep -Milliseconds 500
+    }
+    Fail "Nectar did not close: close it, then run this again."
+  }
+
   if (-not [Environment]::Is64BitOperatingSystem) { Fail "Nectar needs 64-bit Windows." }
-  if (Get-Process -Name nectar -ErrorAction SilentlyContinue) { Fail "Close Nectar first, then run this again." }
 
   $work = Join-Path $env:TEMP ("nectar-install-" + [guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Path $work | Out-Null
@@ -59,13 +85,18 @@
     $windows = $feed.platforms."windows-x86_64"
     if (-not $windows) { Fail "Nectar $($feed.version) has no Windows version yet: https://github.com/$Repo/releases" }
 
-    Write-Host "Downloading Nectar $($feed.version)..."
-    $setup = Join-Path $work "Nectar-setup.exe"
-    Invoke-WebRequest $windows.url -OutFile $setup -UseBasicParsing
-    Write-Host "Installing..."
-    # /S: NSIS without its pages; for this user, no administrator rights.
-    $process = Start-Process $setup -ArgumentList "/S" -Wait -PassThru
-    if ($process.ExitCode -ne 0) { Fail "The installer stopped with code $($process.ExitCode)." }
+    if ((Get-InstalledVersion) -eq $feed.version) {
+      Write-Host "Nectar $($feed.version) is already the latest."
+    } else {
+      Write-Host "Downloading Nectar $($feed.version)..."
+      $setup = Join-Path $work "Nectar-setup.exe"
+      Invoke-WebRequest $windows.url -OutFile $setup -UseBasicParsing
+      Close-Nectar
+      Write-Host "Installing..."
+      # /S: NSIS without its pages; for this user, no administrator rights.
+      $process = Start-Process $setup -ArgumentList "/S" -Wait -PassThru
+      if ($process.ExitCode -ne 0) { Fail "The installer stopped with code $($process.ExitCode)." }
+    }
 
     $client = Find-OracleClient
     if ($client) {
@@ -85,7 +116,9 @@
 
     $app = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Nectar") -Filter "*.exe" -ErrorAction SilentlyContinue |
       Where-Object { $_.Name -notlike "uninstall*" } | Select-Object -First 1
-    if ($app) {
+    if ($app -and (Get-Process -Name nectar -ErrorAction SilentlyContinue)) {
+      Write-Host "Nectar is up to date." -ForegroundColor Green
+    } elseif ($app) {
       Write-Host "Nectar is installed. Opening it..." -ForegroundColor Green
       Start-Process $app.FullName
     } else {
